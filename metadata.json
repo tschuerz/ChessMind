@@ -1,0 +1,6 @@
+{
+  "name": "ChessMind",
+  "description": "AI chess platform with adjustable-strength Stockfish opponent, post-game engine evaluation, and personalized AI coaching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
