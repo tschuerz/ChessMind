@@ -131,6 +131,99 @@ app.post('/api/coach/test', async (req: Request, res: Response) => {
   }
 });
 
+// Real-Time In-Game Coach Companion Q&A
+app.post('/api/coach/chat', async (req: Request, res: Response) => {
+  try {
+    const { question, fen, coachPersona = 'friendly', lastMove, gameMeta } = req.body || {};
+
+    if (!question || typeof question !== 'string') {
+      return res.status(400).json({ error: 'Question is required' });
+    }
+
+    const personaInstructions: Record<string, string> = {
+      friendly:
+        'You are the Friendly Coach: warm, encouraging, positive, and patient. Celebrate progress and explain concepts gently.',
+      strict:
+        'You are the Strict Coach: direct, disciplined, and uncompromising on fundamentals. Demand alertness and punish bad habits.',
+      analytical:
+        'You are the Analytical Coach: a Grandmaster tactician who speaks in precise tactical terms, diagonals, files, and calculating depth.',
+      beginner:
+        'You are the Beginner Coach: simple, clear, focusing strictly on fundamental principles (center control, king safety, active pieces).',
+    };
+
+    const effectivePersona =
+      personaInstructions[coachPersona] ||
+      personaInstructions['friendly'];
+
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: process.env.GEMINI_API_KEY,
+          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+        });
+
+        const prompt = `Context:
+Current Board FEN: "${fen || 'startpos'}"
+Last Move Played: ${lastMove?.san ? `${lastMove.color === 'w' ? 'White' : 'Black'} played ${lastMove.san} (${lastMove.classification || 'normal'})` : 'Opening position'}
+Player Color: ${gameMeta?.playerColor || 'white'}
+Move Number: ${gameMeta?.moveNumber || 1}
+
+Student's Question: "${question}"
+
+Instructions:
+${effectivePersona}
+Answer the student's question directly in 1-3 concise sentences.
+- Base advice on real chess principles: king safety, piece coordination, central control, and pawn structure.
+- Do not spoil the immediate top move unless the student asks for a direct hint; instead guide their thinking.
+- Keep the response short, clear, and readable during active play.`;
+
+        const responsePromise = ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: prompt,
+          config: {
+            systemInstruction:
+              'You are ChessMind In-Game AI Companion. Concise, authoritative, insightful chess coach responding in 1 to 3 sentences.',
+          },
+        });
+
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Gemini chat timeout')), 5000)
+        );
+
+        const response = (await Promise.race([responsePromise, timeoutPromise])) as any;
+        const answer = response?.text?.trim();
+        if (answer) {
+          return res.json({ answer, source: 'gemini', persona: coachPersona });
+        }
+      } catch (geminiErr) {
+        console.warn('Gemini chat fallback to heuristic companion:', geminiErr);
+      }
+    }
+
+    // High-quality contextual offline fallback
+    const q = question.toLowerCase();
+    let answer = '';
+    if (q.includes('king') || q.includes('safe')) {
+      answer = 'Keep your castled king protected behind pawns. Avoid pushing the f-pawn or h-pawn unnecessarily if opponent pieces are aimed at your kingside.';
+    } else if (q.includes('piece') || q.includes('hang') || q.includes('threat')) {
+      answer = 'Scan for undefended pieces before moving. Check if your opponent has created any direct skewers, forks, or discovered attacks.';
+    } else if (q.includes('why') || q.includes('opponent')) {
+      answer = lastMove?.san
+        ? `The opponent played ${lastMove.san} to increase piece pressure and contest key squares. Look at which diagonals or ranks they just opened.`
+        : 'Your opponent is fighting for central influence and improving their piece mobility.';
+    } else if (q.includes('plan') || q.includes('should') || q.includes('what to do')) {
+      answer = 'Look at the least active piece in your camp and find an outpost for it. Control open files with your rooks and contest the center.';
+    } else {
+      answer = 'Focus on candidate moves: checks, captures, and threats first. Make sure every move improves your piece activity and keeps your king safe.';
+    }
+
+    return res.json({ answer, source: 'offline_coach', persona: coachPersona });
+  } catch (err: unknown) {
+    console.error('Error in /api/coach/chat:', err);
+    return res.status(500).json({ error: 'Failed to generate coach response' });
+  }
+});
+
 // Post-Game AI Coach Explanation & Analysis
 app.post('/api/coach/analyze', async (req: Request, res: Response) => {
   try {

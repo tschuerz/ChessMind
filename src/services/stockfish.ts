@@ -1,5 +1,11 @@
 import { Chess, Square } from 'chess.js';
-import { AnalyzedMove, DifficultyElo, MoveClassification } from '../types/chess';
+import {
+  AnalyzedMove,
+  ClassificationSummary,
+  DifficultyElo,
+  FullGameAnalysis,
+  MoveClassification,
+} from '../types/chess';
 
 // Piece values in centipawns
 const PIECE_VALUES: Record<string, number> = {
@@ -491,20 +497,25 @@ export class StockfishEngine {
   }
 
   // Full Post-Game Analysis of an entire game
+  // Full Post-Game Analysis of an entire game
   public async analyzeFullGame(
     pgn: string,
     onProgress?: (progressPercent: number) => void
-  ): Promise<{
-    analyzedMoves: AnalyzedMove[];
-    whiteAccuracy: number;
-    blackAccuracy: number;
-  }> {
+  ): Promise<FullGameAnalysis> {
     const replayChess = new Chess();
     try {
       replayChess.loadPgn(pgn);
     } catch {
       // If PGN has issues, return empty
-      return { analyzedMoves: [], whiteAccuracy: 80, blackAccuracy: 80 };
+      return {
+        analyzedMoves: [],
+        whiteAccuracy: 80,
+        blackAccuracy: 80,
+        classificationBreakdown: {
+          white: { brilliant: 0, great: 0, best: 0, excellent: 0, good: 0, book: 0, inaccuracy: 0, mistake: 0, blunder: 0 },
+          black: { brilliant: 0, great: 0, best: 0, excellent: 0, good: 0, book: 0, inaccuracy: 0, mistake: 0, blunder: 0 },
+        },
+      };
     }
 
     const historyVerbose = replayChess.history({ verbose: true });
@@ -517,13 +528,38 @@ export class StockfishEngine {
     let blackCplTotal = 0;
     let blackMovesCount = 0;
 
+    const whiteBreakdown: ClassificationSummary = {
+      brilliant: 0,
+      great: 0,
+      best: 0,
+      excellent: 0,
+      good: 0,
+      book: 0,
+      inaccuracy: 0,
+      mistake: 0,
+      blunder: 0,
+    };
+
+    const blackBreakdown: ClassificationSummary = {
+      brilliant: 0,
+      great: 0,
+      best: 0,
+      excellent: 0,
+      good: 0,
+      book: 0,
+      inaccuracy: 0,
+      mistake: 0,
+      blunder: 0,
+    };
+
     for (let i = 0; i < historyVerbose.length; i++) {
       const move = historyVerbose[i];
       const fenBefore = move.before;
       const fenAfter = move.after;
       const isWhite = move.color === 'w';
+      const plyNumber = i + 1;
 
-      // Find best move in position before (fast 1-ply tactical search)
+      // Find best move in position before (fast tactical search)
       let bestMoveUci = `${move.from}${move.to}${move.promotion || ''}`;
       let bestMoveSan = move.san;
       let currentPositionEval = prevEval;
@@ -548,15 +584,31 @@ export class StockfishEngine {
         evalAfter = currentPositionEval;
       }
 
+      const playedUci = `${move.from}${move.to}${move.promotion || ''}`;
+      const isPlayedBest = playedUci === bestMoveUci;
+
+      // Forced mate detection
+      const isMateForcedBefore = isWhite ? currentPositionEval >= 9000 : currentPositionEval <= -9000;
+      const isMateForcedAfter = isWhite ? evalAfter >= 9000 : evalAfter <= -9000;
+      const isForcedMateContinuation = isMateForcedBefore && isMateForcedAfter;
+
       // Centipawn loss calculation for the side that moved
       let centipawnLoss = 0;
-      if (isWhite) {
+      if (isPlayedBest || isForcedMateContinuation) {
+        centipawnLoss = 0;
+      } else if (isWhite) {
         centipawnLoss = Math.max(0, currentPositionEval - evalAfter);
-        whiteCplTotal += centipawnLoss;
-        whiteMovesCount++;
       } else {
         centipawnLoss = Math.max(0, evalAfter - currentPositionEval);
-        blackCplTotal += centipawnLoss;
+      }
+
+      // Clamp centipawn loss to avoid skewing averages on forced mates
+      const clampedCpl = Math.min(1000, centipawnLoss);
+      if (isWhite) {
+        whiteCplTotal += clampedCpl;
+        whiteMovesCount++;
+      } else {
+        blackCplTotal += clampedCpl;
         blackMovesCount++;
       }
 
@@ -564,16 +616,24 @@ export class StockfishEngine {
       const winChance = 100 / (1 + Math.exp(-0.003682 * evalAfter));
 
       // Move classification
-      const playedUci = `${move.from}${move.to}${move.promotion || ''}`;
-      const classification = this.classifyMove(
+      const classification = classifyMoveQuality({
         move,
         playedUci,
-        bestMoveUci,
+        bestUci: bestMoveUci,
         centipawnLoss,
-        currentPositionEval,
+        evalBefore: currentPositionEval,
         evalAfter,
-        isWhite
-      );
+        isWhite,
+        plyNumber,
+        isForcedMateContinuation,
+      });
+
+      // Update separate counters
+      if (isWhite) {
+        whiteBreakdown[classification]++;
+      } else {
+        blackBreakdown[classification]++;
+      }
 
       // Display evaluation string
       let displayEval = '';
@@ -586,7 +646,7 @@ export class StockfishEngine {
       }
 
       analyzedMoves.push({
-        ply: i + 1,
+        ply: plyNumber,
         moveNumber: Math.floor(i / 2) + 1,
         color: move.color,
         san: move.san,
@@ -610,13 +670,13 @@ export class StockfishEngine {
         onProgress(Math.round(((i + 1) / historyVerbose.length) * 100));
       }
       // Yield to event loop so browser stays responsive and progress animates
-      await new Promise((resolve) => setTimeout(resolve, 8));
+      await new Promise((resolve) => setTimeout(resolve, 6));
     }
 
     // Accuracy calculation: Chess.com / Lichess standard exponential formula
     // Accuracy % = 103.1668 * exp(-0.04354 * avgCPL) - 3.1668 clamped to 0-100
     const calcAccuracy = (totalCpl: number, count: number) => {
-      if (count === 0) return 90;
+      if (count === 0) return 92;
       const avgCpl = totalCpl / count / 10; // convert to decipawns
       const raw = 103.1668 * Math.exp(-0.04354 * avgCpl) - 3.1668;
       return Math.round(Math.max(10, Math.min(99.4, raw)) * 10) / 10;
@@ -629,58 +689,104 @@ export class StockfishEngine {
       analyzedMoves,
       whiteAccuracy,
       blackAccuracy,
+      classificationBreakdown: {
+        white: whiteBreakdown,
+        black: blackBreakdown,
+      },
     };
   }
+}
 
-  // Move Classification logic
-  private classifyMove(
-    move: { captured?: string; san: string; piece: string },
-    playedUci: string,
-    bestUci: string,
-    centipawnLoss: number,
-    evalBefore: number,
-    evalAfter: number,
-    isWhite: boolean
-  ): MoveClassification {
-    const isBest = playedUci === bestUci;
+// Opening book moves for classification
+const BOOK_OPENING_SAN = new Set([
+  'e4', 'd4', 'Nf3', 'c4', 'g3', 'b3', 'f4', 'Nc3', 'e3', 'd3',
+  'Bc4', 'Bb5', 'O-O',
+  'e5', 'c5', 'e6', 'c6', 'd5', 'Nf6', 'g6', 'd6', 'Nc6', 'b6',
+  'Be7', 'Bb4', 'Bg7',
+]);
 
-    // Brilliant move criteria: Material sacrifice that leads to winning position
-    const isPieceSacrifice =
-      ['n', 'b', 'r', 'q'].includes(move.piece) &&
-      move.captured !== 'q' &&
-      ((isWhite && evalAfter > 200) || (!isWhite && evalAfter < -200));
+export interface ClassifyMoveParams {
+  move: { captured?: string; san: string; piece: string };
+  playedUci: string;
+  bestUci: string;
+  centipawnLoss: number;
+  evalBefore: number;
+  evalAfter: number;
+  isWhite: boolean;
+  plyNumber: number;
+  isForcedMateContinuation?: boolean;
+}
 
-    if (isPieceSacrifice && isBest && centipawnLoss === 0) {
-      return 'brilliant';
-    }
+export function classifyMoveQuality(params: ClassifyMoveParams): MoveClassification {
+  const {
+    move,
+    playedUci,
+    bestUci,
+    centipawnLoss,
+    evalBefore,
+    evalAfter,
+    isWhite,
+    plyNumber,
+    isForcedMateContinuation,
+  } = params;
 
-    // Great move: Only winning move in a critical position
-    if (isBest && Math.abs(evalBefore) > 150 && centipawnLoss === 0) {
-      return 'great';
-    }
+  const isBest = playedUci === bestUci;
 
-    if (isBest) {
-      return 'best';
-    }
-
-    if (centipawnLoss < 15) {
-      return 'excellent';
-    }
-
-    if (centipawnLoss < 45) {
-      return 'good';
-    }
-
-    if (centipawnLoss < 110) {
-      return 'inaccuracy';
-    }
-
-    if (centipawnLoss < 260) {
-      return 'mistake';
-    }
-
-    return 'blunder';
+  // 1. Forced Mate Continuation:
+  // If player maintains a forced mate sequence, never penalize or label blunder/mistake
+  if (isForcedMateContinuation) {
+    if (isBest) return 'best';
+    if (centipawnLoss <= 30) return 'excellent';
+    return 'good';
   }
+
+  // 2. Brilliant: Material sacrifice of a minor/major piece leading to a clearly winning position
+  const isPieceSacrifice =
+    ['n', 'b', 'r', 'q'].includes(move.piece) &&
+    move.captured !== 'q' &&
+    ((isWhite && evalAfter >= 150) || (!isWhite && evalAfter <= -150));
+
+  if (isPieceSacrifice && isBest && centipawnLoss === 0) {
+    return 'brilliant';
+  }
+
+  // 3. Great move: Only winning/defensive move in a sharp or difficult position
+  if (isBest && Math.abs(evalBefore) >= 120 && centipawnLoss === 0) {
+    return 'great';
+  }
+
+  // 4. Opening Book: Early moves adhering to recognized chess opening theory with low loss
+  if (plyNumber <= 8 && centipawnLoss <= 25 && BOOK_OPENING_SAN.has(move.san)) {
+    return 'book';
+  }
+
+  // 5. Best Move: Engine top choice or near-zero loss
+  if (isBest || centipawnLoss <= 5) {
+    return 'best';
+  }
+
+  // 6. Excellent Move: Minimal loss
+  if (centipawnLoss <= 25) {
+    return 'excellent';
+  }
+
+  // 7. Good Move: Modest loss
+  if (centipawnLoss <= 60) {
+    return 'good';
+  }
+
+  // 8. Inaccuracy: Suboptimal but not game-losing
+  if (centipawnLoss <= 130) {
+    return 'inaccuracy';
+  }
+
+  // 9. Mistake: Significant disadvantage incurred
+  if (centipawnLoss <= 300) {
+    return 'mistake';
+  }
+
+  // 10. Blunder: Game-changing tactical error
+  return 'blunder';
 }
 
 export const stockfish = new StockfishEngine();

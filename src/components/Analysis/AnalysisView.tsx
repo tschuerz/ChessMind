@@ -35,6 +35,11 @@ import {
   RotateCcw,
   HelpCircle,
   TrendingUp,
+  Upload,
+  FileText,
+  X,
+  GitBranch,
+  CornerUpLeft,
 } from 'lucide-react';
 
 interface AnalysisViewProps {
@@ -80,6 +85,82 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
   );
 
   const analyzedGameIdRef = useRef<string | null>(null);
+
+  // Import PGN states
+  const [isImportOpen, setIsImportOpen] = useState<boolean>(false);
+  const [importPgnText, setImportPgnText] = useState<string>('');
+  const [importError, setImportError] = useState<string>('');
+
+  // Exploration Variation Line state
+  const [variationChess, setVariationChess] = useState<Chess | null>(null);
+  const [variationMoves, setVariationMoves] = useState<
+    Array<{ san: string; eval: number; displayEval: string; from: string; to: string }>
+  >([]);
+
+  // Import PGN logic
+  const handleImportSubmit = (pgnInput: string) => {
+    setImportError('');
+    const trimmed = pgnInput.trim();
+    if (!trimmed) {
+      setImportError('Please enter or upload a valid PGN string.');
+      return;
+    }
+
+    try {
+      const test = new Chess();
+      test.loadPgn(trimmed);
+      const history = test.history();
+      if (history.length === 0) {
+        setImportError('The provided PGN contains no moves.');
+        return;
+      }
+
+      const importedRecord: GameRecord = {
+        id: `imported_${Date.now()}`,
+        date: new Date().toISOString(),
+        playerColor: 'white',
+        opponentElo: 1600,
+        playerEloBefore: 1200,
+        playerEloAfter: 1200,
+        ratingDelta: 0,
+        result: test.isCheckmate() ? 'win' : test.isDraw() ? 'draw' : 'in_progress',
+        termination: test.isCheckmate() ? 'checkmate' : test.isDraw() ? 'stalemate' : 'timeout',
+        pgn: test.pgn(),
+        finalFen: test.fen(),
+        movesCount: history.length,
+        durationSeconds: 180,
+        whiteAccuracy: 0,
+        blackAccuracy: 0,
+        openingName: 'Imported PGN Game',
+        eco: 'A00',
+        analyzedMoves: [],
+      };
+
+      storage.saveGame(importedRecord);
+      setActiveGame(importedRecord);
+      setVariationChess(null);
+      setVariationMoves([]);
+      setIsImportOpen(false);
+      setImportPgnText('');
+      runFullGameAnalysis(importedRecord);
+    } catch (err: unknown) {
+      setImportError(err instanceof Error ? err.message : 'Invalid PGN format');
+    }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      if (content) {
+        setImportPgnText(content);
+        handleImportSubmit(content);
+      }
+    };
+    reader.readAsText(file);
+  };
 
   // Load and analyze game
   useEffect(() => {
@@ -359,6 +440,9 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
 
   // Current board state calculation
   const currentChess = useMemo(() => {
+    if (variationChess) {
+      return variationChess;
+    }
     if (isRetrying && retryChess) {
       return retryChess;
     }
@@ -375,23 +459,75 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
       }
     }
     return new Chess();
-  }, [activeGame, currentPlyIndex, analyzedMoves, isRetrying, retryChess]);
+  }, [activeGame, currentPlyIndex, analyzedMoves, isRetrying, retryChess, variationChess]);
 
   // Best move arrow
   const bestMoveArrow = useMemo(() => {
-    if (isRetrying) return null;
+    if (isRetrying || variationMoves.length > 0) return null;
     if (!currentMove || !currentMove.bestMoveUci || currentMove.bestMoveUci.length < 4) return null;
     return {
       from: currentMove.bestMoveUci.slice(0, 2),
       to: currentMove.bestMoveUci.slice(2, 4),
     };
-  }, [currentMove, isRetrying]);
+  }, [currentMove, isRetrying, variationMoves.length]);
 
   // Last move squares
   const lastMoveSquares = useMemo(() => {
+    if (variationMoves.length > 0) {
+      const last = variationMoves[variationMoves.length - 1];
+      return { from: last.from, to: last.to };
+    }
     if (isRetrying || !currentMove) return null;
     return { from: currentMove.from, to: currentMove.to };
-  }, [currentMove, isRetrying]);
+  }, [currentMove, isRetrying, variationMoves]);
+
+  // Exit variation line back to main game line
+  const handleExitVariation = () => {
+    setVariationChess(null);
+    setVariationMoves([]);
+  };
+
+  // Handle board move: handles both Retry mode and Free Exploration mode
+  const handleBoardMove = (moveData: { from: Square; to: Square; promotion?: string }) => {
+    if (isRetrying) {
+      handleRetryMove(moveData);
+      return;
+    }
+
+    try {
+      const base = variationChess || currentChess;
+      const testChess = new Chess(base.fen());
+      const move = testChess.move({
+        from: moveData.from,
+        to: moveData.to,
+        promotion: moveData.promotion || 'q',
+      });
+
+      if (!move) return;
+
+      if (move.captured) sounds.playCapture();
+      else if (move.flags.includes('k') || move.flags.includes('q')) sounds.playCastle();
+      else sounds.playMove();
+
+      const evalAfter = stockfish.evaluatePositionSync(testChess);
+      let displayEval = '';
+      if (Math.abs(evalAfter) >= 9000) {
+        const m = Math.ceil((10000 - Math.abs(evalAfter)) / 100);
+        displayEval = evalAfter > 0 ? `M${m}` : `-M${m}`;
+      } else {
+        const pawns = (evalAfter / 100).toFixed(1);
+        displayEval = evalAfter >= 0 ? `+${pawns}` : pawns;
+      }
+
+      setVariationChess(testChess);
+      setVariationMoves((prev) => [
+        ...prev,
+        { san: move.san, eval: evalAfter, displayEval, from: move.from, to: move.to },
+      ]);
+    } catch {
+      // Illegal move handled gracefully
+    }
+  };
 
   // Start "Retry Mistake" mode
   const handleStartRetry = () => {
@@ -552,15 +688,86 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
         </div>
         <h2 className="text-xl font-bold text-white mb-2">No Game Selected for Analysis</h2>
         <p className="text-sm text-zinc-400 mb-6 max-w-md mx-auto">
-          Play a game against Stockfish or choose a previous match from your Game History to review deep engine evaluations and AI coaching.
+          Play a game against Stockfish, import an existing PGN file, or select a previous match from your Game History to review full engine analysis and AI coaching.
         </p>
-        {onBackToPlay && (
+        <div className="flex items-center justify-center gap-3">
           <button
-            onClick={onBackToPlay}
-            className="px-5 py-2.5 rounded-xl text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition-all cursor-pointer shadow-sm"
+            onClick={() => setIsImportOpen(true)}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition-all cursor-pointer shadow-sm"
           >
-            Play a Match
+            <Upload className="w-4 h-4" />
+            <span>Import PGN</span>
           </button>
+          {onBackToPlay && (
+            <button
+              onClick={onBackToPlay}
+              className="px-5 py-2.5 rounded-xl text-sm font-semibold bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-all cursor-pointer shadow-sm"
+            >
+              Play a Match
+            </button>
+          )}
+        </div>
+
+        {/* Modal if opened from empty state */}
+        {isImportOpen && (
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="w-full max-w-lg bg-[#141519] border border-zinc-800 rounded-2xl p-6 text-left shadow-2xl">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Upload className="w-5 h-5 text-emerald-400" />
+                  <h3 className="text-base font-bold text-white">Import PGN Game</h3>
+                </div>
+                <button
+                  onClick={() => setIsImportOpen(false)}
+                  className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <p className="text-xs text-zinc-400 mb-4">
+                Paste Portable Game Notation (PGN) text or load a .pgn file to evaluate moves and get coaching feedback.
+              </p>
+
+              {importError && (
+                <div className="p-3 mb-4 rounded-xl bg-rose-950/40 border border-rose-800 text-rose-300 text-xs">
+                  {importError}
+                </div>
+              )}
+
+              <textarea
+                value={importPgnText}
+                onChange={(e) => setImportPgnText(e.target.value)}
+                placeholder="1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. O-O Nf6..."
+                rows={6}
+                className="w-full bg-zinc-900 border border-zinc-750 rounded-xl p-3 text-xs text-zinc-200 font-mono placeholder-zinc-600 focus:outline-none focus:border-emerald-500 mb-4 resize-none"
+              />
+
+              <div className="flex items-center justify-between gap-3 pt-2 border-t border-zinc-800">
+                <label className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-zinc-800 hover:bg-zinc-750 text-zinc-300 transition-colors cursor-pointer">
+                  <FileText className="w-4 h-4 text-emerald-400" />
+                  <span>Upload .pgn</span>
+                  <input type="file" accept=".pgn" onChange={handleFileUpload} className="hidden" />
+                </label>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setIsImportOpen(false)}
+                    className="px-4 py-2 rounded-xl text-xs font-medium text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => handleImportSubmit(importPgnText)}
+                    disabled={!importPgnText.trim()}
+                    className="px-5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white transition-colors cursor-pointer shadow-sm"
+                  >
+                    Analyze Game
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     );
@@ -660,6 +867,15 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
           >
             <Download className="w-3.5 h-3.5" />
             <span>Download</span>
+          </button>
+
+          <button
+            onClick={() => setIsImportOpen(true)}
+            className="flex items-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors cursor-pointer shadow-sm"
+            title="Import PGN text or file"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>Import PGN</span>
           </button>
 
           <button
@@ -775,6 +991,74 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* COMPLETE MOVE CLASSIFICATION BREAKDOWN TABLE */}
+      {!isAnalyzingEngine && analyzedMoves.length > 0 && (
+        <div className="p-4 rounded-2xl bg-[#141519] border border-zinc-800 mb-6 shadow-sm">
+          <div className="flex items-center justify-between mb-3 pb-2 border-b border-zinc-800/80">
+            <div className="flex items-center gap-2">
+              <Award className="w-4 h-4 text-emerald-400" />
+              <h3 className="text-xs font-bold text-zinc-200 uppercase tracking-wider">
+                Full Move Quality Breakdown
+              </h3>
+            </div>
+            <div className="text-xs text-zinc-400 font-mono">
+              <span className="text-emerald-400 font-bold">{analyzedMoves.length}</span> Total Moves Analyzed
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-[11px] text-zinc-500 uppercase tracking-wider border-b border-zinc-800/60">
+                  <th className="py-2 text-left font-semibold">Classification</th>
+                  <th className="py-2 text-center font-semibold">White Moves</th>
+                  <th className="py-2 text-center font-semibold">Black Moves</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/40">
+                {(
+                  [
+                    { id: 'brilliant', label: 'Brilliant', style: 'text-cyan-400 bg-cyan-950/60 border-cyan-800' },
+                    { id: 'great', label: 'Great', style: 'text-blue-400 bg-blue-950/60 border-blue-800' },
+                    { id: 'best', label: 'Best', style: 'text-emerald-400 bg-emerald-950/60 border-emerald-800' },
+                    { id: 'excellent', label: 'Excellent', style: 'text-emerald-300 bg-emerald-950/40 border-emerald-900' },
+                    { id: 'good', label: 'Good', style: 'text-zinc-300 bg-zinc-800 border-zinc-700' },
+                    { id: 'book', label: 'Book', style: 'text-indigo-400 bg-indigo-950/60 border-indigo-800' },
+                    { id: 'inaccuracy', label: 'Inaccuracy', style: 'text-amber-400 bg-amber-950/60 border-amber-800' },
+                    { id: 'mistake', label: 'Mistake', style: 'text-orange-400 bg-orange-950/60 border-orange-800' },
+                    { id: 'blunder', label: 'Blunder', style: 'text-rose-400 bg-rose-950/60 border-rose-800' },
+                  ] as const
+                ).map((tier) => (
+                  <tr key={tier.id} className="hover:bg-zinc-850/40 transition-colors">
+                    <td className="py-2 text-left">
+                      <span className={`inline-block px-2.5 py-0.5 rounded text-[11px] font-semibold border ${tier.style}`}>
+                        {tier.label}
+                      </span>
+                    </td>
+                    <td className="py-2 text-center text-zinc-200 font-bold">
+                      {classificationCounts[tier.id].white}
+                    </td>
+                    <td className="py-2 text-center text-zinc-200 font-bold">
+                      {classificationCounts[tier.id].black}
+                    </td>
+                  </tr>
+                ))}
+                {/* Total row strictly verifying sums */}
+                <tr className="bg-zinc-900/60 font-bold text-zinc-300 border-t border-zinc-700">
+                  <td className="py-2.5 text-left text-zinc-300 font-sans text-xs">Total Moves</td>
+                  <td className="py-2.5 text-center text-emerald-400">
+                    {Object.values(classificationCounts).reduce((acc, c) => acc + c.white, 0)}
+                  </td>
+                  <td className="py-2.5 text-center text-emerald-400">
+                    {Object.values(classificationCounts).reduce((acc, c) => acc + c.black, 0)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* CHESS.COM STYLE ADVANTAGE GRAPH */}
       <div className="p-4 rounded-2xl bg-[#141519] border border-zinc-800 mb-6">
@@ -914,19 +1198,54 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left Column: Board + Step Controls */}
         <div className="lg:col-span-7 flex flex-col items-center">
+          {/* Active Variation Line Banner */}
+          {variationMoves.length > 0 && (
+            <div className="w-full max-w-[560px] mb-3 p-2.5 rounded-xl bg-cyan-950/40 border border-cyan-800/60 flex items-center justify-between shadow-sm">
+              <div className="flex items-center gap-2 text-xs text-cyan-200">
+                <GitBranch className="w-4 h-4 text-cyan-400 shrink-0" />
+                <span className="truncate">
+                  Variation: <strong className="font-mono text-white">{variationMoves.map((m) => m.san).join(' ')}</strong>
+                </span>
+                <span className="font-mono text-cyan-400 font-bold shrink-0">
+                  ({variationMoves[variationMoves.length - 1].displayEval})
+                </span>
+              </div>
+              <button
+                onClick={handleExitVariation}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors cursor-pointer shrink-0 ml-2"
+                title="Return to the game line"
+              >
+                <CornerUpLeft className="w-3.5 h-3.5" />
+                <span>Return to Game</span>
+              </button>
+            </div>
+          )}
+
           <div className="flex items-stretch gap-2.5 sm:gap-3 w-full max-w-[560px]">
             <EvalBar
-              scoreCp={currentMove ? currentMove.eval : 20}
+              scoreCp={
+                variationMoves.length > 0
+                  ? variationMoves[variationMoves.length - 1].eval
+                  : currentMove
+                  ? currentMove.eval
+                  : 20
+              }
               orientation={activeGame.playerColor}
-              displayEval={currentMove ? currentMove.displayEval : '+0.2'}
+              displayEval={
+                variationMoves.length > 0
+                  ? variationMoves[variationMoves.length - 1].displayEval
+                  : currentMove
+                  ? currentMove.displayEval
+                  : '+0.2'
+              }
             />
 
             <div className="flex-1">
               <Chessboard
                 chess={currentChess}
                 orientation={activeGame.playerColor}
-                isInteractive={isRetrying}
-                onMove={isRetrying ? handleRetryMove : undefined}
+                isInteractive={true}
+                onMove={handleBoardMove}
                 lastMove={lastMoveSquares}
                 bestMoveArrow={bestMoveArrow}
                 theme={settings.boardTheme}
@@ -941,6 +1260,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
               <button
                 onClick={() => {
                   handleExitRetry();
+                  handleExitVariation();
                   setCurrentPlyIndex(-1);
                 }}
                 disabled={currentPlyIndex === -1}
@@ -952,6 +1272,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
               <button
                 onClick={() => {
                   handleExitRetry();
+                  handleExitVariation();
                   setCurrentPlyIndex((p) => Math.max(-1, p - 1));
                 }}
                 disabled={currentPlyIndex === -1}
@@ -961,7 +1282,10 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
                 <ChevronLeft className="w-4 h-4" />
               </button>
               <button
-                onClick={() => setIsPlayingAuto(!isPlayingAuto)}
+                onClick={() => {
+                  handleExitVariation();
+                  setIsPlayingAuto(!isPlayingAuto);
+                }}
                 className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors cursor-pointer"
                 title={isPlayingAuto ? 'Pause playback' : 'Auto play moves'}
               >
@@ -970,6 +1294,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
               <button
                 onClick={() => {
                   handleExitRetry();
+                  handleExitVariation();
                   setCurrentPlyIndex((p) => Math.min(analyzedMoves.length - 1, p + 1));
                 }}
                 disabled={currentPlyIndex >= analyzedMoves.length - 1}
@@ -981,6 +1306,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
               <button
                 onClick={() => {
                   handleExitRetry();
+                  handleExitVariation();
                   setCurrentPlyIndex(analyzedMoves.length - 1);
                 }}
                 disabled={currentPlyIndex >= analyzedMoves.length - 1}
@@ -1325,6 +1651,95 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* IMPORT PGN MODAL */}
+      {isImportOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-[#141519] border border-zinc-800 rounded-2xl p-6 text-left shadow-2xl">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Upload className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-base font-bold text-white">Import PGN Game</h3>
+              </div>
+              <button
+                onClick={() => setIsImportOpen(false)}
+                className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-400 mb-3">
+              Paste Portable Game Notation (PGN) text or load a .pgn file to evaluate moves and get coaching feedback.
+            </p>
+
+            {/* Quick Demo Games */}
+            <div className="mb-3 flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] text-zinc-500 font-medium">Try Famous Games:</span>
+              <button
+                type="button"
+                onClick={() =>
+                  setImportPgnText(
+                    '1. e4 e5 2. Nf3 d6 3. d4 Bg4 4. dxe5 Bxf3 5. Qxf3 dxe5 6. Bc4 Nf6 7. Qb3 Qe7 8. Nc3 c6 9. Bg5 b5 10. Nxb5 cxb5 11. Bxb5+ Nbd7 12. O-O-O Rd8 13. Rxd7 Rxd7 14. Rd1 Qe6 15. Bxd7+ Nxd7 16. Qb8+ Nxb8 17. Rd8#'
+                  )
+                }
+                className="px-2 py-0.5 rounded-md bg-zinc-850 hover:bg-zinc-800 text-[11px] text-emerald-400 border border-zinc-750 transition-colors cursor-pointer"
+              >
+                The Opera Game
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setImportPgnText(
+                    '1. e4 e5 2. f4 exf4 3. Bc4 Qh4+ 4. Kf1 b5 5. Bxb5 Nf6 6. Nf3 Qh6 7. d3 Nh5 8. Nh4 Qg5 9. Nf5 c6 10. g4 Nf6 11. Rg1 cxb5 12. h4 Qg6 13. h5 Qg5 14. Qf3 Ng8 15. Bxf4 Qf6 16. Nc3 Bc5 17. Nd5 Qxb2 18. Bd6 Bxg1 19. e5 Qxa1+ 20. Ke2 Na6 21. Nxg7+ Kd8 22. Qf6+ Nxf6 23. Be7#'
+                  )
+                }
+                className="px-2 py-0.5 rounded-md bg-zinc-850 hover:bg-zinc-800 text-[11px] text-cyan-400 border border-zinc-750 transition-colors cursor-pointer"
+              >
+                The Immortal Game
+              </button>
+            </div>
+
+            {importError && (
+              <div className="p-3 mb-4 rounded-xl bg-rose-950/40 border border-rose-800 text-rose-300 text-xs">
+                {importError}
+              </div>
+            )}
+
+            <textarea
+              value={importPgnText}
+              onChange={(e) => setImportPgnText(e.target.value)}
+              placeholder="1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. O-O Nf6..."
+              rows={6}
+              className="w-full bg-zinc-900 border border-zinc-750 rounded-xl p-3 text-xs text-zinc-200 font-mono placeholder-zinc-600 focus:outline-none focus:border-emerald-500 mb-4 resize-none"
+            />
+
+            <div className="flex items-center justify-between gap-3 pt-2 border-t border-zinc-800">
+              <label className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-zinc-800 hover:bg-zinc-750 text-zinc-300 transition-colors cursor-pointer">
+                <FileText className="w-4 h-4 text-emerald-400" />
+                <span>Upload .pgn</span>
+                <input type="file" accept=".pgn" onChange={handleFileUpload} className="hidden" />
+              </label>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setIsImportOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => handleImportSubmit(importPgnText)}
+                  disabled={!importPgnText.trim()}
+                  className="px-5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white transition-colors cursor-pointer shadow-sm"
+                >
+                  Analyze Game
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

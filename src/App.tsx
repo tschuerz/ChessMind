@@ -29,6 +29,7 @@ export default function App() {
   const [newGameTrigger, setNewGameTrigger] = useState<{
     playerColor: PlayerColor | 'random';
     aiElo: DifficultyElo;
+    gameMode?: 'ai' | 'coach';
   } | null>(null);
 
   // Initialize sound settings
@@ -57,8 +58,19 @@ export default function App() {
     setActiveTab('analysis');
   };
 
-  const handleStartNewMatch = (color: PlayerColor | 'random' = 'white', elo: DifficultyElo = 1200) => {
-    setNewGameTrigger({ playerColor: color, aiElo: elo });
+  const handleStartNewMatch = (
+    color: PlayerColor | 'random' = 'white',
+    elo: DifficultyElo = 1200,
+    mode: 'ai' | 'coach' = 'coach'
+  ) => {
+    const updatedSettings = {
+      ...settings,
+      playCoachEnabled: mode === 'coach',
+    };
+    setSettings(updatedSettings);
+    storage.saveSettings(updatedSettings);
+
+    setNewGameTrigger({ playerColor: color, aiElo: elo, gameMode: mode });
     setActiveTab('play');
   };
 
@@ -78,7 +90,7 @@ export default function App() {
           }
         }}
         playerElo={playerElo}
-        onNewGameClick={() => handleStartNewMatch('white', 1200)}
+        onNewGameClick={() => handleStartNewMatch('white', 1200, 'coach')}
       />
 
       {/* Main Content Area */}
@@ -86,7 +98,8 @@ export default function App() {
         {/* Quick Dashboard Header on Play View */}
         {activeTab === 'play' && (
           <div className="max-w-7xl mx-auto px-4 sm:px-6 pt-4 pb-1">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-2">
+            {/* Top Stat Row */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
               <div className="p-3 rounded-xl bg-[#141519] border border-zinc-800 flex items-center justify-between">
                 <div>
                   <div className="text-[11px] text-zinc-400 font-medium">Estimated Elo</div>
@@ -136,6 +149,47 @@ export default function App() {
                   <Trophy className="w-4 h-4 text-emerald-400" />
                 </div>
               </div>
+            </div>
+
+            {/* Quick Game Mode Launchers */}
+            <div className="flex items-center gap-2 mb-2 overflow-x-auto pb-1">
+              <span className="text-[11px] font-semibold uppercase text-zinc-500 mr-1 shrink-0">
+                Mode:
+              </span>
+              <button
+                onClick={() => handleStartNewMatch('white', 1200, 'coach')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer shrink-0 ${
+                  settings.playCoachEnabled
+                    ? 'bg-emerald-600/20 border-emerald-500 text-emerald-300 shadow-xs'
+                    : 'bg-[#141519] border-zinc-800 text-zinc-400 hover:text-white'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Play vs Coach (AI Companion)</span>
+              </button>
+
+              <button
+                onClick={() => handleStartNewMatch('white', 1200, 'ai')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer shrink-0 ${
+                  !settings.playCoachEnabled
+                    ? 'bg-emerald-600/20 border-emerald-500 text-emerald-300 shadow-xs'
+                    : 'bg-[#141519] border-zinc-800 text-zinc-400 hover:text-white'
+                }`}
+              >
+                <PlayIcon className="w-3.5 h-3.5 text-zinc-400" />
+                <span>Play vs AI (Rated Match)</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  if (games.length > 0) setSelectedGameForAnalysis(games[0]);
+                  setActiveTab('analysis');
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-zinc-800 bg-[#141519] text-zinc-400 hover:text-white transition-all cursor-pointer shrink-0"
+              >
+                <BarChart2 className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Review & Analyze Game</span>
+              </button>
             </div>
           </div>
         )}

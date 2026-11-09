@@ -91,7 +91,40 @@ export interface UserRatingHistory {
   gameId: string;
 }
 
-export type CoachPersonaId = 'nolan' | 'sasha' | 'viktor' | 'lily' | 'magnus';
+export interface ClassificationSummary {
+  brilliant: number;
+  great: number;
+  best: number;
+  excellent: number;
+  good: number;
+  book: number;
+  inaccuracy: number;
+  mistake: number;
+  blunder: number;
+}
+
+export interface FullGameAnalysis {
+  analyzedMoves: AnalyzedMove[];
+  whiteAccuracy: number;
+  blackAccuracy: number;
+  classificationBreakdown: {
+    white: ClassificationSummary;
+    black: ClassificationSummary;
+  };
+}
+
+export type CoachPersonaId =
+  | 'friendly'
+  | 'strict'
+  | 'analytical'
+  | 'beginner'
+  | 'nolan'
+  | 'sasha'
+  | 'viktor'
+  | 'lily'
+  | 'magnus';
+
+export type GameMode = 'ai' | 'coach' | 'analysis';
 
 export interface UserSettings {
   aiProvider: 'gemini' | 'openai_compatible';
@@ -111,4 +144,5 @@ export interface UserSettings {
 export interface ActiveGameSetup {
   playerColor: PlayerColor | 'random';
   aiElo: DifficultyElo;
+  gameMode?: 'ai' | 'coach';
 }

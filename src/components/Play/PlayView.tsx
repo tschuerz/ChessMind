@@ -16,7 +16,14 @@ import { stockfish } from '../../services/stockfish';
 import { storage } from '../../services/storage';
 import { identifyOpening } from '../../services/openings';
 import { sounds } from '../../services/sound';
-import { COACH_PERSONAS, coachVoice, generateCoachComment } from '../../services/coachPersona';
+import {
+  COACH_PERSONAS,
+  coachVoice,
+  generateCoachComment,
+  explainCurrentPosition,
+  explainLastMoveDetail,
+  answerCoachQuestionOffline,
+} from '../../services/coachPersona';
 import {
   RotateCcw,
   RotateCw,
@@ -32,6 +39,10 @@ import {
   Volume2,
   VolumeX,
   Lightbulb,
+  MessageSquare,
+  Send,
+  Compass,
+  HelpCircle,
 } from 'lucide-react';
 
 interface PlayViewProps {
@@ -40,7 +51,8 @@ interface PlayViewProps {
   onGameCompleted: (game: GameRecord) => void;
   onRequestAnalysis: (game: GameRecord) => void;
   onUpdateSettings?: (settings: UserSettings) => void;
-  initialSetup?: { playerColor: PlayerColor | 'random'; aiElo: DifficultyElo } | null;
+  initialSetup?: { playerColor: PlayerColor | 'random'; aiElo: DifficultyElo; gameMode?: 'ai' | 'coach' } | null;
+  gameMode?: 'ai' | 'coach';
 }
 
 const getInitialCoachGreeting = (personaId: CoachPersonaId) => {
@@ -100,6 +112,18 @@ export const PlayView: React.FC<PlayViewProps> = ({
   const [hintHighlightSquares, setHintHighlightSquares] = useState<Record<string, string>>({});
   const [hintArrow, setHintArrow] = useState<{ from: string; to: string } | null>(null);
 
+  // Live Coach Companion & Q&A states
+  const [lastMoveDetail, setLastMoveDetail] = useState<{
+    san: string;
+    color: 'w' | 'b';
+    from: string;
+    to: string;
+    bestSan?: string;
+    classification?: MoveClassification;
+  } | null>(null);
+  const [coachQuestion, setCoachQuestion] = useState<string>('');
+  const [isCoachThinking, setIsCoachThinking] = useState<boolean>(false);
+
   // Modals & UI states
   const [isSetupOpen, setIsSetupOpen] = useState<boolean>(false);
   const [gameOverData, setGameOverData] = useState<{
@@ -138,6 +162,8 @@ export const PlayView: React.FC<PlayViewProps> = ({
     setOpponentElo(elo);
     setHistoryMoves([]);
     setLastMove(null);
+    setLastMoveDetail(null);
+    setCoachQuestion('');
     setEvalScoreCp(20);
     setIsAiThinking(false);
     setGameOverData(null);
@@ -149,7 +175,7 @@ export const PlayView: React.FC<PlayViewProps> = ({
     setActiveHint(null);
     setHintHighlightSquares({});
     setHintArrow(null);
-    const greeting = getInitialCoachGreeting(settings.coachPersona || 'nolan');
+    const greeting = getInitialCoachGreeting(settings.coachPersona || 'friendly');
     setCoachSpeech(greeting);
     setCoachMoodTag('Game Start');
     if (settings.coachVoiceEnabled && settings.playCoachEnabled) {
@@ -276,6 +302,14 @@ export const PlayView: React.FC<PlayViewProps> = ({
 
         setChess(newGame);
         setLastMove({ from: move.from, to: move.to });
+        setLastMoveDetail({
+          san: move.san,
+          color: move.color,
+          from: move.from,
+          to: move.to,
+          bestSan: move.san,
+          classification: 'best',
+        });
         setHistoryMoves((prev) => [...prev, { san: move.san, from: move.from, to: move.to }]);
 
         // Update live evaluation
@@ -380,12 +414,21 @@ export const PlayView: React.FC<PlayViewProps> = ({
         else classification = 'good';
       }
 
+      setLastMoveDetail({
+        san: move.san,
+        color: move.color,
+        from: move.from,
+        to: move.to,
+        bestSan: bestMoveSan || move.san,
+        classification,
+      });
+
       const comment = generateCoachComment(
         move.san,
         classification,
         0,
         bestMoveSan || (bestMoveUci ? bestMoveUci.slice(0, 4) : ''),
-        settings.coachPersona || 'nolan',
+        settings.coachPersona || 'friendly',
         true
       );
 
@@ -414,6 +457,98 @@ export const PlayView: React.FC<PlayViewProps> = ({
       // Illegal move handled gracefully
     }
   };
+
+  // Interactive Coach Actions: Explain Position
+  const handleExplainPosition = useCallback(() => {
+    const text = explainCurrentPosition(chess, settings.coachPersona);
+    setCoachMoodTag('Position Analysis');
+    setCoachSpeech(text);
+    if (settings.coachVoiceEnabled) {
+      coachVoice.speak(text, settings.coachPersona);
+    }
+  }, [chess, settings.coachPersona, settings.coachVoiceEnabled]);
+
+  // Interactive Coach Actions: Explain Last Move
+  const handleExplainLastMove = useCallback(() => {
+    if (!lastMoveDetail) {
+      const text = 'No moves have been played yet. Establish a pawn in the center and prepare piece development.';
+      setCoachMoodTag('Opening Advice');
+      setCoachSpeech(text);
+      if (settings.coachVoiceEnabled) {
+        coachVoice.speak(text, settings.coachPersona);
+      }
+      return;
+    }
+    const text = explainLastMoveDetail(lastMoveDetail, chess, settings.coachPersona);
+    setCoachMoodTag('Last Move Insight');
+    setCoachSpeech(text);
+    if (settings.coachVoiceEnabled) {
+      coachVoice.speak(text, settings.coachPersona);
+    }
+  }, [lastMoveDetail, chess, settings.coachPersona, settings.coachVoiceEnabled]);
+
+  // Interactive Coach Actions: Ask Question
+  const handleAskCoach = useCallback(
+    async (questionText: string) => {
+      const trimmed = questionText.trim();
+      if (!trimmed || isCoachThinking) return;
+
+      setIsCoachThinking(true);
+      setCoachMoodTag('Coach Answering');
+
+      try {
+        const res = await fetch('/api/coach/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question: trimmed,
+            fen: chess.fen(),
+            coachPersona: settings.coachPersona,
+            lastMove: lastMoveDetail,
+            gameMeta: {
+              playerColor,
+              opponentElo,
+              moveNumber: Math.floor(historyMoves.length / 2) + 1,
+            },
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.answer) {
+            setCoachSpeech(data.answer);
+            if (settings.coachVoiceEnabled) {
+              coachVoice.speak(data.answer, settings.coachPersona);
+            }
+            setCoachQuestion('');
+            setIsCoachThinking(false);
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn('API coach chat unavailable, falling back to local coach intelligence:', e);
+      }
+
+      // Contextual offline fallback
+      const answer = answerCoachQuestionOffline(trimmed, chess, lastMoveDetail, settings.coachPersona);
+      setCoachSpeech(answer);
+      if (settings.coachVoiceEnabled) {
+        coachVoice.speak(answer, settings.coachPersona);
+      }
+      setCoachQuestion('');
+      setIsCoachThinking(false);
+    },
+    [
+      isCoachThinking,
+      chess,
+      settings.coachPersona,
+      lastMoveDetail,
+      playerColor,
+      opponentElo,
+      historyMoves.length,
+      settings.coachVoiceEnabled,
+    ]
+  );
 
   // Live Hint System (Tier 1: Strategic Idea -> Tier 2: Highlight Piece -> Tier 3: Show Arrow)
   const handleClearHint = () => {
@@ -860,41 +995,120 @@ export const PlayView: React.FC<PlayViewProps> = ({
                   </p>
                 </div>
 
-                {/* Tiered Live Hints Button */}
-                <div className="flex items-center justify-between gap-2 pt-1 border-t border-zinc-800/60">
-                  <button
-                    type="button"
-                    onClick={handleRequestHint}
-                    disabled={chess.isGameOver() || isAiThinking || !isPlayerTurn}
-                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-xs font-semibold transition-all cursor-pointer border ${
-                      hintLevel > 0
-                        ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
-                        : 'bg-emerald-600/15 border-emerald-500/30 hover:bg-emerald-600/25 text-emerald-300'
-                    } disabled:opacity-40 disabled:cursor-not-allowed`}
-                    title="Ask your coach for tiered guidance"
-                  >
-                    <Lightbulb className="w-3.5 h-3.5" />
-                    <span>
-                      {hintLevel === 0
-                        ? 'Ask Coach for Hint'
-                        : hintLevel === 1
-                        ? 'Next: Highlight Piece'
-                        : hintLevel === 2
-                        ? 'Next: Reveal Best Move'
-                        : 'Best Move Shown'}
-                    </span>
-                  </button>
-
-                  {hintLevel > 0 && (
+                {/* Coach Interactive Actions: Tiered Hint + Explain Position + Explain Last Move */}
+                <div className="flex flex-col gap-2 pt-1 border-t border-zinc-800/60">
+                  <div className="grid grid-cols-2 gap-2">
                     <button
                       type="button"
-                      onClick={handleClearHint}
-                      className="py-2 px-2.5 rounded-lg text-xs font-medium bg-zinc-850 hover:bg-zinc-800 text-zinc-400 border border-zinc-750 transition-colors cursor-pointer"
-                      title="Clear hint markers"
+                      onClick={handleExplainPosition}
+                      disabled={chess.isGameOver() || isAiThinking}
+                      className="flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-lg text-[11px] font-semibold bg-zinc-850 hover:bg-zinc-800 text-zinc-200 border border-zinc-750 transition-colors cursor-pointer disabled:opacity-40"
+                      title="Get an evaluation and overview of this position"
                     >
-                      Clear
+                      <Compass className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Explain Position</span>
                     </button>
-                  )}
+
+                    <button
+                      type="button"
+                      onClick={handleExplainLastMove}
+                      disabled={chess.isGameOver() || isAiThinking}
+                      className="flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-lg text-[11px] font-semibold bg-zinc-850 hover:bg-zinc-800 text-zinc-200 border border-zinc-750 transition-colors cursor-pointer disabled:opacity-40"
+                      title="Understand the ideas behind the last move played"
+                    >
+                      <HelpCircle className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Explain Last Move</span>
+                    </button>
+                  </div>
+
+                  {/* Tiered Live Hints Button */}
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={handleRequestHint}
+                      disabled={chess.isGameOver() || isAiThinking || !isPlayerTurn}
+                      className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold transition-all cursor-pointer border ${
+                        hintLevel > 0
+                          ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                          : 'bg-emerald-600/15 border-emerald-500/30 hover:bg-emerald-600/25 text-emerald-300'
+                      } disabled:opacity-40 disabled:cursor-not-allowed`}
+                      title="Ask your coach for tiered guidance"
+                    >
+                      <Lightbulb className="w-3.5 h-3.5" />
+                      <span>
+                        {hintLevel === 0
+                          ? '💡 Ask Coach for Hint'
+                          : hintLevel === 1
+                          ? 'Next: Highlight Piece'
+                          : hintLevel === 2
+                          ? 'Next: Reveal Best Move'
+                          : 'Best Move Shown'}
+                      </span>
+                    </button>
+
+                    {hintLevel > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleClearHint}
+                        className="py-1.5 px-2.5 rounded-lg text-xs font-medium bg-zinc-850 hover:bg-zinc-800 text-zinc-400 border border-zinc-750 transition-colors cursor-pointer"
+                        title="Clear hint markers"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Quick Question Chips */}
+                  <div className="pt-2 border-t border-zinc-800/60">
+                    <div className="text-[10px] font-semibold uppercase text-zinc-400 mb-1.5 flex items-center gap-1">
+                      <MessageSquare className="w-3 h-3 text-emerald-400" />
+                      <span>Ask Your Coach</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+                      {[
+                        'Is my king safe?',
+                        "What's the plan?",
+                        'Why that move?',
+                        'Any hanging pieces?',
+                      ].map((chip) => (
+                        <button
+                          key={chip}
+                          type="button"
+                          onClick={() => handleAskCoach(chip)}
+                          disabled={isCoachThinking}
+                          className="shrink-0 px-2 py-0.5 rounded-md bg-zinc-850 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-750 text-[11px] transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          {chip}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Chat Input Form */}
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        handleAskCoach(coachQuestion);
+                      }}
+                      className="flex items-center gap-1.5 mt-2"
+                    >
+                      <input
+                        type="text"
+                        value={coachQuestion}
+                        onChange={(e) => setCoachQuestion(e.target.value)}
+                        placeholder="Ask coach anything about this position..."
+                        disabled={isCoachThinking}
+                        className="flex-1 bg-zinc-900 border border-zinc-750 rounded-lg px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!coachQuestion.trim() || isCoachThinking}
+                        className="p-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white transition-colors cursor-pointer shrink-0"
+                        title="Send question to coach"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                      </button>
+                    </form>
+                  </div>
                 </div>
               </>
             ) : (
